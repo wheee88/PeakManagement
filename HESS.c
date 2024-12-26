@@ -31,7 +31,7 @@ double P_pi_BESS = 1.65;
 
 double Ki_P_SCES = 0.01 / 50e-6;
 double Kp_P_SCES = 0.01;
-double Ki_P_BESS = 0.001 / 50e-6;
+double Ki_P_BESS = 0.1 / 50e-6;
 double Kp_P_BESS = 0.001;
 static double prev_Vsrc_BESS = 0.0;
 static double ntimes = 0.0;
@@ -42,7 +42,7 @@ static double PC_SCES;
 static double PD_BESS;
 static double PH_BESS;
 static double PC_BESS;
-
+static int is_initialized = 0;
 
 double NOR(double A, double B) {
     return !((A != 0) || (B != 0)); // A와 B가 모두 0인 경우에만 1 반환
@@ -73,28 +73,39 @@ double rate_limiter(double input, double prev_output, double up_rate, double dow
 
 void hessctrl_(
     double *V_ESS_BUS, double *V_Load, double *V_char, double *V_disc, 
-    double *P_SUB, double *P_Rail, double *P_Load, double *P_BESS, 
-    double *P_SCES, double *R_Sub, double *R_int, double *Tlength, 
+    double *P_SUB, double *P_Rail, double *P_ACLoad, double *P_BESS, 
+    double *P_SCES, double *E_BESS, double *E_SCES, double *R_Sub, double *R_int, double *Tlength, 
     double *BESS_Capa, double *BESS_ramp, double *SCES_Capa, double *Ppeak, 
     double *managed, double *Vsrc_SCES, double *Vsrc_BESS, double *Timer, 
     double *Tdelt, double *Debug
 ) {
-    if (*Timer >= (*Tlength * ntimes + 1.0)) {
-        reset = 1.0;
+    if (*Timer >= (*Tlength * ntimes + 1.0)) 
+    {
+        if (reset != 1.0) { // reset이 아직 설정되지 않은 경우에만 실행
+            reset = 1.0;
+            ntimes += 1.0; // ntimes 증가
+        }
+    } else 
+    {
+        reset = 0.0; // 조건을 충족하지 않으면 reset을 초기화
     }
 
-    if (*Timer > 1.0) {
+    // Operation delay switching signal to remove initial transient phenomenon
+    if (*Timer >= 1.0) 
+    {
         OnSig = 1.0;
     }
 
-    dmode = (*V_disc > *V_ESS_BUS) ? 1.0 : 0.0;
+    // Operation mode selector
+    dmode = (*V_disc >= *V_ESS_BUS) ? 1.0 : 0.0;
     dmode = dmode * OnSig;
 
-    cmode = (*V_ESS_BUS > *V_char) ? 1.0 : 0.0;
+    cmode = (*V_ESS_BUS >= *V_char) ? 1.0 : 0.0;
     cmode = cmode * OnSig;
 
     hmode = NOR(dmode, cmode);
 
+    // Limiter boundary
     SC_UL = ((*SCES_Capa / *V_char) * *R_int) + *V_char;
     SC_LL = -((*SCES_Capa / *V_disc) * *R_int) + *V_disc;
     BE_UL = ((*BESS_Capa / *V_char) * *R_int) + *V_char;
@@ -102,12 +113,14 @@ void hessctrl_(
 
     BESS_ramp_lim = (OnSig == 1) ? ((*BESS_ramp / *V_ESS_BUS) * *R_int) : ((*BESS_ramp / 1.65) * *R_int);
 
+    // Substation capacity limit
     P_RefB = ((*V_char - *V_disc) / *R_Sub) * *V_disc;
-    double temp_PSUB = *P_SUB;
 
+    // Power reference for peak power management
+    double temp_PSUB = *P_SUB;
     *P_SUB = Limiter(temp_PSUB, INF, 0.0);
 
-    Ptot = (*P_Load + *P_SUB);
+    Ptot = (*P_ACLoad + *P_SUB);
     Ptot /= 3600.0;
     if (reset != 1.0) {
         E_sub += (TInt * Ptot);
@@ -126,33 +139,40 @@ void hessctrl_(
     E_diff /= (*Tlength - *Timer + 1.0);
 
     P_mng = (E_diff * *managed * OnSig);
-
-    PD_SCES = ((*P_SUB + P_mng - P_RefB) * dmode);
-    PH_SCES = ((-*P_SCES + P_mng) * hmode);
-    PC_SCES = (((-*V_ESS_BUS + *V_char) / *R_Sub) * *V_ESS_BUS) * cmode;
+    
+    PD_SCES = ((*P_SUB + P_mng - P_RefB) * dmode); // Discharge SCES
+    PH_SCES = ((-*P_SCES + P_mng) * hmode); // Hold SCES
+    PC_SCES = (((-*V_ESS_BUS + *V_char) / *R_Sub) * *V_ESS_BUS) * cmode; // Charge SCES
 
     P_err_SCES = PD_SCES + PH_SCES + PC_SCES;
     P_Int_SCES += (Ki_P_SCES * P_err_SCES * *Tdelt);
     P_pi_SCES = (Kp_P_SCES * P_err_SCES) + P_Int_SCES;
     *Vsrc_SCES = Limiter(P_pi_SCES, SC_UL, SC_LL);
 
-    PD_BESS = ((-*P_BESS + *P_Rail - P_RefB) * dmode);
-    PH_BESS = (*managed == 1) ? ((*P_SCES) * hmode) : ((-*P_BESS) * hmode);
-    PC_BESS = ((*P_SCES + ((- *V_ESS_BUS + *V_char) / *R_Sub) * *V_ESS_BUS) * cmode);
+    PD_BESS = (-*P_BESS + *P_Rail - P_RefB) * dmode; // Discharge BESS
+    PH_BESS = ((*managed == 1) ? (*P_SCES) : (-*P_BESS) ) * hmode; // Hold BESS
+    PC_BESS = (*P_SCES + ((- *V_ESS_BUS + *V_char) / *R_Sub) * *V_ESS_BUS) * cmode; // Charge BESS
 
     P_err_BESS = PD_BESS + PH_BESS + PC_BESS;
     P_Int_BESS += (Ki_P_BESS * P_err_BESS * *Tdelt);
     P_pi_BESS = (Kp_P_BESS * P_err_BESS) + P_Int_BESS;
-
-    double temp_Vsrc_BESS = rate_limiter(P_pi_BESS, prev_Vsrc_BESS, BESS_ramp_lim, BESS_ramp_lim, *Tdelt);
-    *Vsrc_BESS = Limiter(temp_Vsrc_BESS, BE_UL, BE_LL);
+    *Vsrc_BESS = Limiter(P_pi_BESS, BE_UL, BE_LL);
+    *Vsrc_BESS = rate_limiter(*Vsrc_BESS, prev_Vsrc_BESS, BESS_ramp_lim, BESS_ramp_lim, *Tdelt);
 
     prev_Vsrc_BESS = *Vsrc_BESS;
 
-    Debug[0] = cmode;
-    Debug[1] = dmode;
-    Debug[2] = hmode;
+    if (reset != 1.0) {
+        *E_SCES += (TInt * *P_SCES);
+        *E_BESS += (TInt * *P_BESS);
+    } else {
+        *E_SCES = 0;
+        *E_BESS = 0;
+    }
+
+    Debug[0] = PD_BESS;
+    Debug[1] = PH_BESS;
+    Debug[2] = PC_BESS;
     Debug[3] = *V_ESS_BUS;
     Debug[4] = SC_UL;
-    Debug[5] = P_err_SCES;
+    Debug[5] = BESS_ramp_lim;
 }
