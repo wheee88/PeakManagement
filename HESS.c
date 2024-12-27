@@ -3,13 +3,13 @@
 #include <string.h>
 #include <unistd.h> // POSIX 표준 sleep 함수를 위해
 
-#define INF 1000000000.0 // 양의 무한대
+#define INF 1.0/0.0 // 양의 무한대
 double OnSig = 0;
 double dmode = 0;
 double hmode = 0;
 double cmode = 0;
 double mode = 0;
-double TInt = 0.001;
+double TInt = 0.05;
 double SC_UL = 0.0;
 double SC_LL = 0.0;
 double BE_UL = 0.0;
@@ -19,9 +19,7 @@ double P_RefB = 0.0;
 double P_ACLoad = 0.0;
 double P_mng = 0.0;
 double Ptot;
-double E_sub;
-double E_manage;
-double E_diff;
+double E_mng;
 double P_err_SCES;
 double P_Int_SCES;
 double P_pi_SCES = 1.65;
@@ -29,10 +27,10 @@ double P_err_BESS;
 double P_Int_BESS;
 double P_pi_BESS = 1.65;
 
-double Ki_P_SCES = 0.01 / 50e-6;
-double Kp_P_SCES = 0.01;
-double Ki_P_BESS = 0.1 / 50e-6;
+double Kp_P_SCES = 0.001;
+double Ki_P_SCES = 200;// 0.01 / 50e-6;
 double Kp_P_BESS = 0.001;
+double Ki_P_BESS = 20; // 0.001 / 50e-6;
 static double prev_Vsrc_BESS = 0.0;
 static double ntimes = 0.0;
 static double reset = 0.0;
@@ -71,32 +69,33 @@ double rate_limiter(double input, double prev_output, double up_rate, double dow
     return output;
 }
 
+// 추가: 이전 입력값 저장
+static double prev_P_err_SCES = 0.0;
+static double prev_P_err_BESS = 0.0;
+
 void hessctrl_(
     double *V_ESS_BUS, double *V_Load, double *V_char, double *V_disc, 
     double *P_SUB, double *P_Rail, double *P_ACLoad, double *P_BESS, 
     double *P_SCES, double *E_BESS, double *E_SCES, double *R_Sub, double *R_int, double *Tlength, 
     double *BESS_Capa, double *BESS_ramp, double *SCES_Capa, double *Ppeak, 
-    double *managed, double *Vsrc_SCES, double *Vsrc_BESS, double *Timer, 
-    double *Tdelt, double *Debug
+    double *managed, double *Vsrc_SCES, double *Vsrc_BESS,
+    double *E_sub, double *E_manage, double *E_diff, 
+    double *Timer, double *Tdelt, double *Debug
 ) {
-    if (*Timer >= (*Tlength * ntimes + 1.0)) 
-    {
-        if (reset != 1.0) { // reset이 아직 설정되지 않은 경우에만 실행
+    // 기존 초기화 및 모드 설정은 그대로 유지
+    if (*Timer >= (*Tlength * ntimes + 1.0)) {
+        if (reset != 1.0) {
             reset = 1.0;
-            ntimes += 1.0; // ntimes 증가
+            ntimes += 1.0;
         }
-    } else 
-    {
-        reset = 0.0; // 조건을 충족하지 않으면 reset을 초기화
+    } else {
+        reset = 0.0;
     }
 
-    // Operation delay switching signal to remove initial transient phenomenon
-    if (*Timer >= 1.0) 
-    {
+    if (*Timer >= 1.0) {
         OnSig = 1.0;
     }
 
-    // Operation mode selector
     dmode = (*V_disc >= *V_ESS_BUS) ? 1.0 : 0.0;
     dmode = dmode * OnSig;
 
@@ -105,7 +104,6 @@ void hessctrl_(
 
     hmode = NOR(dmode, cmode);
 
-    // Limiter boundary
     SC_UL = ((*SCES_Capa / *V_char) * *R_int) + *V_char;
     SC_LL = -((*SCES_Capa / *V_disc) * *R_int) + *V_disc;
     BE_UL = ((*BESS_Capa / *V_char) * *R_int) + *V_char;
@@ -113,62 +111,60 @@ void hessctrl_(
 
     BESS_ramp_lim = (OnSig == 1) ? ((*BESS_ramp / *V_ESS_BUS) * *R_int) : ((*BESS_ramp / 1.65) * *R_int);
 
-    // Substation capacity limit
     P_RefB = ((*V_char - *V_disc) / *R_Sub) * *V_disc;
 
-    // Power reference for peak power management
-    double temp_PSUB = *P_SUB;
-    *P_SUB = Limiter(temp_PSUB, INF, 0.0);
+    *P_SUB = Limiter(*P_SUB, INF, 0.0);
 
-    Ptot = (*P_ACLoad + *P_SUB);
-    Ptot /= 3600.0;
+    Ptot = (*P_ACLoad + *P_SUB) / 3600.0;
     if (reset != 1.0) {
-        E_sub += (TInt * Ptot);
+        *E_sub += (TInt * Ptot);
     } else {
-        E_sub = 0;
+        *E_sub = 0;
     }
 
-    *Ppeak /= 3600.0;
     if (reset != 1.0) {
-        E_manage += (TInt * *Ppeak);
+        *E_manage += (TInt * *Ppeak / 3600.0);
     } else {
-        E_manage = 0;
+        *E_manage = 0;
     }
 
-    E_diff = Limiter((E_sub - E_manage), INF, 0.0) * 3.6;
-    E_diff /= (*Tlength - *Timer + 1.0);
+    *E_diff = Limiter((*E_sub - *E_manage), INF, 0.0) * 3.6;
+    E_mng = *E_diff / (*Tlength - *Timer + 1.0);
 
-    P_mng = (E_diff * *managed * OnSig);
+    P_mng = (E_mng * *managed * OnSig);
 
-    if (!InitFlag)  // 초기 PI 제어 출력 설정
-    {
+    if (!InitFlag) {
         *Vsrc_SCES = 1.65;
         *Vsrc_BESS = 1.65;
         P_Int_SCES = 1.65;
         P_Int_BESS = 1.65;
         InitFlag = 1;
-    }
-    else 
-    {
-        PD_SCES = ((*P_SUB + P_mng - P_RefB) * dmode); // Discharge SCES
-        PH_SCES = ((-*P_SCES + P_mng) * hmode); // Hold SCES
-        PC_SCES = (((-*V_ESS_BUS + *V_char) / *R_Sub) * *V_ESS_BUS) * cmode; // Charge SCES
-
+    } else {
+        // Trapezoidal 방식으로 적분 항 계산
+        PD_SCES = ((*P_SUB + P_mng - P_RefB) * dmode);
+        PH_SCES = ((-*P_SCES + P_mng) * hmode);
+        PC_SCES = (((-*V_ESS_BUS + *V_char) / *R_Sub) * *V_ESS_BUS) * cmode;
         P_err_SCES = PD_SCES + PH_SCES + PC_SCES;
-        P_Int_SCES += (Ki_P_SCES * P_err_SCES * *Tdelt);
+
+        // Trapezoidal Integration for SCES
+        P_Int_SCES += (Ki_P_SCES * (*Tdelt) * 0.5 * (prev_P_err_SCES + P_err_SCES));
+        prev_P_err_SCES = P_err_SCES; // Update previous error
+
         P_pi_SCES = (Kp_P_SCES * P_err_SCES) + P_Int_SCES;
-
-        PD_BESS = (-*P_BESS + *P_Rail - P_RefB) * dmode; // Discharge BESS
-        PH_BESS = ((*managed == 1) ? (*P_SCES) : (-*P_BESS) ) * hmode; // Hold BESS
-        PC_BESS = (*P_SCES + ((- *V_ESS_BUS + *V_char) / *R_Sub) * *V_ESS_BUS) * cmode; // Charge BESS
-
-        P_err_BESS = PD_BESS + PH_BESS + PC_BESS;
-        P_Int_BESS += (Ki_P_BESS * P_err_BESS * *Tdelt);
-        P_pi_BESS = (Kp_P_BESS * P_err_BESS) + P_Int_BESS;
         *Vsrc_SCES = Limiter(P_pi_SCES, SC_UL, SC_LL);
+
+        PD_BESS = (-*P_BESS + *P_Rail - P_RefB) * dmode;
+        PH_BESS = ((*managed == 1) ? (*P_SCES) : (-*P_BESS)) * hmode;
+        PC_BESS = (*P_SCES + ((-*V_ESS_BUS + *V_char) / *R_Sub) * *V_ESS_BUS) * cmode;
+        P_err_BESS = PD_BESS + PH_BESS + PC_BESS;
+
+        // Trapezoidal Integration for BESS
+        P_Int_BESS += (Ki_P_BESS * (*Tdelt) * 0.5 * (prev_P_err_BESS + P_err_BESS));
+        prev_P_err_BESS = P_err_BESS; // Update previous error
+
+        P_pi_BESS = (Kp_P_BESS * P_err_BESS) + P_Int_BESS;
         *Vsrc_BESS = Limiter(P_pi_BESS, BE_UL, BE_LL);
         *Vsrc_BESS = rate_limiter(*Vsrc_BESS, prev_Vsrc_BESS, BESS_ramp_lim, BESS_ramp_lim, *Tdelt);
-
     }
 
     prev_Vsrc_BESS = *Vsrc_BESS;
@@ -181,7 +177,7 @@ void hessctrl_(
         *E_BESS = 0;
     }
 
-    Debug[0] = P_pi_SCES;
+    Debug[0] = *E_manage;
     Debug[1] = P_pi_BESS;
     Debug[2] = PC_BESS;
     Debug[3] = *V_ESS_BUS;
