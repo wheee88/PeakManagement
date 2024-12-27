@@ -42,7 +42,7 @@ static double PC_SCES;
 static double PD_BESS;
 static double PH_BESS;
 static double PC_BESS;
-static int is_initialized = 0;
+static int InitFlag = 0;
 
 double NOR(double A, double B) {
     return !((A != 0) || (B != 0)); // A와 B가 모두 0인 경우에만 1 반환
@@ -139,25 +139,37 @@ void hessctrl_(
     E_diff /= (*Tlength - *Timer + 1.0);
 
     P_mng = (E_diff * *managed * OnSig);
-    
-    PD_SCES = ((*P_SUB + P_mng - P_RefB) * dmode); // Discharge SCES
-    PH_SCES = ((-*P_SCES + P_mng) * hmode); // Hold SCES
-    PC_SCES = (((-*V_ESS_BUS + *V_char) / *R_Sub) * *V_ESS_BUS) * cmode; // Charge SCES
 
-    P_err_SCES = PD_SCES + PH_SCES + PC_SCES;
-    P_Int_SCES += (Ki_P_SCES * P_err_SCES * *Tdelt);
-    P_pi_SCES = (Kp_P_SCES * P_err_SCES) + P_Int_SCES;
-    *Vsrc_SCES = Limiter(P_pi_SCES, SC_UL, SC_LL);
+    if (!InitFlag)  // 초기 PI 제어 출력 설정
+    {
+        *Vsrc_SCES = 1.65;
+        *Vsrc_BESS = 1.65;
+        P_Int_SCES = 1.65;
+        P_Int_BESS = 1.65;
+        InitFlag = 1;
+    }
+    else 
+    {
+        PD_SCES = ((*P_SUB + P_mng - P_RefB) * dmode); // Discharge SCES
+        PH_SCES = ((-*P_SCES + P_mng) * hmode); // Hold SCES
+        PC_SCES = (((-*V_ESS_BUS + *V_char) / *R_Sub) * *V_ESS_BUS) * cmode; // Charge SCES
 
-    PD_BESS = (-*P_BESS + *P_Rail - P_RefB) * dmode; // Discharge BESS
-    PH_BESS = ((*managed == 1) ? (*P_SCES) : (-*P_BESS) ) * hmode; // Hold BESS
-    PC_BESS = (*P_SCES + ((- *V_ESS_BUS + *V_char) / *R_Sub) * *V_ESS_BUS) * cmode; // Charge BESS
+        P_err_SCES = PD_SCES + PH_SCES + PC_SCES;
+        P_Int_SCES += (Ki_P_SCES * P_err_SCES * *Tdelt);
+        P_pi_SCES = (Kp_P_SCES * P_err_SCES) + P_Int_SCES;
 
-    P_err_BESS = PD_BESS + PH_BESS + PC_BESS;
-    P_Int_BESS += (Ki_P_BESS * P_err_BESS * *Tdelt);
-    P_pi_BESS = (Kp_P_BESS * P_err_BESS) + P_Int_BESS;
-    *Vsrc_BESS = Limiter(P_pi_BESS, BE_UL, BE_LL);
-    *Vsrc_BESS = rate_limiter(*Vsrc_BESS, prev_Vsrc_BESS, BESS_ramp_lim, BESS_ramp_lim, *Tdelt);
+        PD_BESS = (-*P_BESS + *P_Rail - P_RefB) * dmode; // Discharge BESS
+        PH_BESS = ((*managed == 1) ? (*P_SCES) : (-*P_BESS) ) * hmode; // Hold BESS
+        PC_BESS = (*P_SCES + ((- *V_ESS_BUS + *V_char) / *R_Sub) * *V_ESS_BUS) * cmode; // Charge BESS
+
+        P_err_BESS = PD_BESS + PH_BESS + PC_BESS;
+        P_Int_BESS += (Ki_P_BESS * P_err_BESS * *Tdelt);
+        P_pi_BESS = (Kp_P_BESS * P_err_BESS) + P_Int_BESS;
+        *Vsrc_SCES = Limiter(P_pi_SCES, SC_UL, SC_LL);
+        *Vsrc_BESS = Limiter(P_pi_BESS, BE_UL, BE_LL);
+        *Vsrc_BESS = rate_limiter(*Vsrc_BESS, prev_Vsrc_BESS, BESS_ramp_lim, BESS_ramp_lim, *Tdelt);
+
+    }
 
     prev_Vsrc_BESS = *Vsrc_BESS;
 
@@ -169,8 +181,8 @@ void hessctrl_(
         *E_BESS = 0;
     }
 
-    Debug[0] = PD_BESS;
-    Debug[1] = PH_BESS;
+    Debug[0] = P_pi_SCES;
+    Debug[1] = P_pi_BESS;
     Debug[2] = PC_BESS;
     Debug[3] = *V_ESS_BUS;
     Debug[4] = SC_UL;
