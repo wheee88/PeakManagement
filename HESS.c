@@ -96,12 +96,8 @@ void hessctrl_(
         OnSig = 1.0;
     }
 
-    dmode = (*V_disc >= *V_ESS_BUS) ? 1.0 : 0.0;
-    dmode = dmode * OnSig;
-
-    cmode = (*V_ESS_BUS >= *V_char) ? 1.0 : 0.0;
-    cmode = cmode * OnSig;
-
+    dmode = ((*V_disc >= *V_ESS_BUS) ? 1.0 : 0.0)* OnSig;
+    cmode = ((*V_ESS_BUS >= *V_char) ? 1.0 : 0.0)* OnSig;
     hmode = NOR(dmode, cmode);
 
     SC_UL = ((*SCES_Capa / *V_char) * *R_int) + *V_char;
@@ -169,6 +165,7 @@ void hessctrl_(
 
     prev_Vsrc_BESS = *Vsrc_BESS;
 
+    // Energy Calculation
     if (reset != 1.0) {
         *E_SCES += (TInt * *P_SCES);
         *E_BESS += (TInt * *P_BESS);
